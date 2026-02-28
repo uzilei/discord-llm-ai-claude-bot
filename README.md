@@ -7,6 +7,8 @@ Uses Claude Haiku 4.5 by default. I don't recommend using better models because 
 
 Made over the course of 2 days with help from Claude *(shameful I know, this won't be in my resume)*. Started as just a chatbot for a server with friends, ended up being too drawn in and made it way too capable to not share. The code is actually pretty clean, but I'm not a regular Python dev
 
+Doesn't support DMs and technically doesn't support cross-server usage (input format doesn't distinguish servers, only channels), open an issue or a pull request if you need it
+
 ---
 
 ## Features
