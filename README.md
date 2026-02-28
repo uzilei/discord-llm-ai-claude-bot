@@ -30,6 +30,7 @@ Made over the course of 2 days with help from Claude *(shameful I know, this won
 
 ## Requirements
 
+- Python 3.9 or later
 - **Anthropic API key** — get it from [platform.claude.com/settings/keys](https://platform.claude.com/settings/keys) after making an account and paying at least $5 in credits
 - **Discord bot token** — get it from [discord.com/developers/applications](https://discord.com/developers/applications)
 - **Wolfram Alpha App ID** *(optional)* — get it from [developer.wolframalpha.com](https://developer.wolframalpha.com). Required for math and science queries. Free tier gives 2000 queries/month
