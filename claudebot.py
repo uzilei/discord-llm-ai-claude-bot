@@ -230,7 +230,7 @@ async def on_message(message):
             summary_response = await anthropic_client.messages.create(
                 model=SUMMARY_MODEL,
                 max_tokens=MAX_TOKENS,
-                messages=[{"role": "user", "content": "Summarize these chat messages briefly for a chatbot without formatting, preserving key topics, names, and context. The amount of messages is low because we're testing:\n" + "\n".join(to_summarize)}]
+                messages=[{"role": "user", "content": "Summarize these chat messages briefly for a chatbot without formatting, preserving key topics, names, and context.:\n" + "\n".join(to_summarize)}]
             )
             summary = summary_response.content[0].text
         except Exception:
@@ -493,6 +493,7 @@ async def on_message(message):
             await message.channel.send(embed=embed)
         print(f"\nDEBUG: {new_line}\nTOKENS IN: {response.usage.input_tokens} OUT: {response.usage.output_tokens}\nRESPONSE: {response_text}")
 client.run(discord_token)
+
 
 
 
