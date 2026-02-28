@@ -230,7 +230,7 @@ async def on_message(message):
             summary_response = await anthropic_client.messages.create(
                 model=SUMMARY_MODEL,
                 max_tokens=MAX_TOKENS,
-                messages=[{"role": "user", "content": "Summarize these chat messages briefly for a chatbot without formatting, preserving key topics, names, and context.:\n" + "\n".join(to_summarize)}]
+                messages=[{"role": "user", "content": "Summarize these chat messages briefly for a chatbot without formatting, preserving key topics, names, and context:\n" + "\n".join(to_summarize)}]
             )
             summary = summary_response.content[0].text
         except Exception:
@@ -498,3 +498,4 @@ client.run(discord_token)
 
 
 # managed to keep all this under 500 lines yay
+
