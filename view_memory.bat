@@ -1,4 +1,4 @@
 @echo off
 cd /d "%~dp0"
-python viewmemory.py
+python view_memory.py
 pause
