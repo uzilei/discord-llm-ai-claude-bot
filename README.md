@@ -25,6 +25,7 @@ Doesn't support DMs and technically doesn't support cross-server usage (input fo
 - Code and text file reading (`.py`, `.cpp`, `.json`, `.md` and more)
 - Persistent memory via SQLite with recall, store, and delete
 - Agentic tool chaining with `continue_task` for multi-step autonomous work
+- Efficient use of cache control saving up to 4x the costs compared to usual LLM projects
 - Discord embed parsing
 - Message chunking for responses over 2000 characters
 
