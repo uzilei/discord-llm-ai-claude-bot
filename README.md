@@ -20,7 +20,7 @@ Doesn't support DMs and technically doesn't support cross-server usage (input fo
 - Web fetch with HTML stripping
 - Wolfram Alpha integration for math, science, and unit conversions
 - Image search via DuckDuckGo (for some reason, ran into the most trouble with this, use at own discretion) (opted for this instead of image generation, I am against it)
-- Image analysis via vision (attached images)
+- Image analysis via vision
 - PDF reading (native document block)
 - Code and text file reading (`.py`, `.cpp`, `.json`, `.md` and more)
 - Persistent memory via SQLite with recall, store, and delete
@@ -54,7 +54,7 @@ Enable **Message Content Intent** and the following permissions:
 1. Clone the repo or download the latest .zip in Releases
 2. Install dependencies:
    ```
-   pip install discord.py anthropic aiohttp python-dotenv ddgs
+   pip install py-cord anthropic aiohttp python-dotenv ddgs
    ```
 3. Fill in `.env`:
    ```
@@ -78,7 +78,7 @@ All tunable values are at the top of `claudebot.py`, these are the most importan
 | `TRIGGER_KEYWORDS` | `["claude", "clanker"]` | Keywords that trigger a response |
 | `IGNORED_USERS` | `["SamAltman", "MEE6"]` | Usernames to ignore |
 | `MAX_MESSAGES` | `150` | Message history size before truncation |
-| `TRUNCATION` | `75` | Messages to summarize and drop |
+| `TRUNCATION` | `50` | Message count to summarize and drop to |
 | `MAX_TOKENS` | `5000` | Max output tokens per response |
 | `RANDOM_RESPONSE_CHANCE` | `0.005` | Chance to respond unprompted (1 in 200 default) |
 | `RATE_LIMIT_WINDOW` | `5` | Rate limit window in seconds |
