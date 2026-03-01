@@ -23,10 +23,13 @@ IGNORED_USERS = ["SamAltman", "MEE6"]  # usernames to ignore, case sensitive
 MAX_MESSAGES = 150  # max messages before truncation and summary
 TRUNCATION = 50  # how many messages are left after truncating
 MAX_TOKENS = 5000  # max output tokens per response
-INPUT_CHAR_CAP = 35000  # max characters for any single text input (web fetch, file reads)
-RANDOM_RESPONSE_CHANCE = 0.005  # chance to respond unprompted (1 in 200)
+INPUT_CHAR_CAP = 20000  # max characters for any single text input (web fetch, file reads)
+RANDOM_RESPONSE_CHANCE = 0.001  # chance to respond unprompted (1 in 1000 default)
 RATE_LIMIT_WINDOW = 5  # rate limit window in seconds
 RATE_LIMIT_MESSAGES = 2  # max messages per user within the window
+
+USE_LONG_CACHE = False  # True for 1h cache, False for 5m cache. change according to bot usage frequency. most use cases benefit from False
+CACHE_BLOCK_SIZE = 10  # number of messages per cache block (cached_count = n - (n % CACHE_BLOCK_SIZE))
 
 STARTING_PROMPT_FILE = 'systemprompt.txt'  # system prompt file
 MESSAGES_FILE = 'messages.txt'  # rolling message log file... yes you python nerds i should've done this in a dictionary or whatever, but too late now
@@ -34,9 +37,11 @@ MESSAGES_FILE = 'messages.txt'  # rolling message log file... yes you python ner
 # values used for cost estimation in dollars per million tokens, uses haiku 4.5's costs by default but change according to the pricing table if you want more accurate estimates
 INPUT_TOKENS_COST = 1.0
 OUTPUT_TOKENS_COST = 5.0
-# actual cost may vary, for example some cache write tokens could be written into 1 hour cache for a 2x premium instead of 1.25x
+# actual cost may vary
 
 # ──────────────────────────────────────────────────────────────────────────────
+
+CACHE_WRITE_COST_MULTIPLIER = 2.0 if USE_LONG_CACHE else 1.25  # these are the price differences between cache lengths, don't touch
 
 load_dotenv()
 
@@ -72,6 +77,8 @@ BLOCKED_EXTENSIONS = {
 }
 
 user_message_times = {}
+
+CACHE_CONTROL = {"type": "ephemeral", "ttl": "1h"} if USE_LONG_CACHE else {"type": "ephemeral"}
 
 with open(STARTING_PROMPT_FILE, 'r', encoding='utf-8') as file:
     system_prompt = file.read()
@@ -315,7 +322,7 @@ async def on_message(message):
 
         all_lines = lines[:-1]
         n = len(all_lines)
-        cached_count = n - (n % 10)
+        cached_count = n - (n % CACHE_BLOCK_SIZE)
         cached_lines = all_lines[:cached_count]
         live_lines = all_lines[cached_count:]
 
@@ -324,7 +331,7 @@ async def on_message(message):
             content.append({
                 "type": "text",
                 "text": "\n".join(cached_lines),
-                "cache_control": {"type": "ephemeral"}
+                "cache_control": CACHE_CONTROL
             })
         live_text = ("\n".join(live_lines) + "\n" if live_lines else "") + "RESPOND TO: " + new_line
         content.append({"type": "text", "text": live_text})
@@ -345,7 +352,7 @@ async def on_message(message):
                     system=[{
                         "type": "text",
                         "text": system_prompt,
-                        "cache_control": {"type": "ephemeral"}
+                        "cache_control": CACHE_CONTROL
                     }],
                     tools=[{
                         "name": "web_search",
