@@ -15,34 +15,61 @@ from ddgs import DDGS
 # ── Configuration ─────────────────────────────────────────────────────────────
 # .env file should contain: ANTHROPIC_API_KEY, DISCORD_TOKEN, WOLFRAM_APP_ID (optional)
 
-STARTING_PROMPT_FILE = 'systemprompt.txt'  # system prompt file
-MESSAGES_FILE = 'messages.txt'  # rolling message log
-MAX_MESSAGES = 150  # max messages before truncation
-TRUNCATION = 75  # how many messages to summarize and drop
-MAX_TOKENS = 5000  # max output tokens per response
-RANDOM_RESPONSE_CHANCE = 0.005  # chance to respond unprompted (1 in 200)
-RATE_LIMIT_MESSAGES = 2  # max messages per user within the window
-RATE_LIMIT_WINDOW = 5  # rate limit window in seconds
-
 MODEL = "claude-haiku-4-5"  # model to use
-SUMMARY_MODEL = "claude-haiku-4-5" # model to use to summarize context, not recommended to change
-IGNORED_USERS = ["SamAltman", "MEE6"]  # usernames to ignore, case sensitive
+SUMMARY_MODEL = "claude-haiku-4-5" # model to use to summarize context, changing not recommended
 TRIGGER_KEYWORDS = ["claude", "clanker"]  # keywords that trigger a response
-# ──────────────────────────────────────────────────────────────────────────────
+IGNORED_USERS = ["SamAltman", "MEE6"]  # usernames to ignore, case sensitive
 
-# uncomment the line below to clear the messages file on launch.
-# not sure why you would do that though
-# open(MESSAGES_FILE, 'w', encoding='utf-8').close()
+MAX_MESSAGES = 150  # max messages before truncation and summary
+TRUNCATION = 50  # how many messages are left after truncating
+MAX_TOKENS = 5000  # max output tokens per response
+INPUT_CHAR_CAP = 35000  # max characters for any single text input (web fetch, file reads)
+RANDOM_RESPONSE_CHANCE = 0.005  # chance to respond unprompted (1 in 200)
+RATE_LIMIT_WINDOW = 5  # rate limit window in seconds
+RATE_LIMIT_MESSAGES = 2  # max messages per user within the window
+
+STARTING_PROMPT_FILE = 'systemprompt.txt'  # system prompt file
+MESSAGES_FILE = 'messages.txt'  # rolling message log file... yes you python nerds i should've done this in a dictionary or whatever, but too late now
+
+# values used for cost estimation in dollars per million tokens, uses haiku 4.5's costs by default but change according to the pricing table if you want more accurate estimates
+INPUT_TOKENS_COST = 1.0
+OUTPUT_TOKENS_COST = 5.0
+# actual cost may vary, for example some cache write tokens could be written into 1 hour cache for a 2x premium instead of 1.25x
+
+# ──────────────────────────────────────────────────────────────────────────────
 
 load_dotenv()
 
 intents = discord.Intents.default()
 intents.message_content = True
-client = discord.Client(intents=intents)
+client = discord.Bot(intents=intents)
 
 anthropic_client = anthropic.AsyncAnthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
 discord_token = os.getenv('DISCORD_TOKEN')
 wolfram_app_id = os.getenv('WOLFRAM_APP_ID')
+
+TEXT_EXTENSIONS = {
+    '.txt', '.md', '.py', '.js', '.ts', '.cpp', '.c', '.h', '.hpp',
+    '.java', '.cs', '.go', '.rs', '.rb', '.php', '.html', '.css',
+    '.json', '.xml', '.yaml', '.yml', '.toml', '.ini', '.cfg',
+    '.sh', '.bat', '.ps1', '.sql', '.r', '.swift', '.kt',
+    '.rst', '.csv', '.log', '.tex'
+}
+
+IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
+
+BLOCKED_EXTENSIONS = {
+    '.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz', '.zst',
+    '.exe', '.dll', '.so', '.dylib', '.bin', '.jar', '.class', '.war', '.ear', '.apk', '.ipa',
+    '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v',
+    '.mp3', '.wav', '.flac', '.ogg', '.aac', '.m4a', '.wma',
+    '.docx', '.doc', '.pptx', '.ppt', '.xlsx', '.xls', '.odt', '.ods', '.odp',
+    '.iso', '.img', '.dmg', '.deb', '.rpm', '.msi', '.pkg',
+    '.ttf', '.otf', '.woff', '.woff2',
+    '.pyc', '.pyd', '.o', '.a',
+    '.db', '.sqlite', '.sqlite3',
+    '.bmp', '.tiff', '.ico', '.svg',
+}
 
 user_message_times = {}
 
@@ -62,25 +89,32 @@ def init_db():
     conn.commit()
     conn.close()
 
-def save_memory(memory: str):
+def save_memory(memories):
+    if isinstance(memories, str):
+        memories = [memories]
     conn = sqlite3.connect('memory.db')
-    conn.execute('INSERT INTO memories (memory, timestamp) VALUES (?, ?)',
-                 (memory, datetime.now().isoformat()))
+    conn.executemany('INSERT INTO memories (memory, timestamp) VALUES (?, ?)',
+                 [(m, datetime.now().isoformat()) for m in memories])
     conn.commit()
     conn.close()
 
 def recall_memories(query: str) -> list:
     conn = sqlite3.connect('memory.db')
-    words = query.lower().split()
+    words = [w for w in query.lower().split() if w]
+    if not words:
+        conn.close()
+        return []
     sql = "SELECT id, memory FROM memories WHERE " + " AND ".join(["LOWER(memory) LIKE ?" for _ in words])
     params = [f'%{w}%' for w in words]
     rows = conn.execute(sql + " ORDER BY timestamp DESC LIMIT 10", params).fetchall()
     conn.close()
     return [f"[id:{r[0]}] {r[1]}" for r in rows]
 
-def delete_memory(memory_id: int):
+def delete_memory(memory_ids):
+    if isinstance(memory_ids, int):
+        memory_ids = [memory_ids]
     conn = sqlite3.connect('memory.db')
-    conn.execute('DELETE FROM memories WHERE id = ?', (memory_id,))
+    conn.execute(f'DELETE FROM memories WHERE id IN ({",".join("?" * len(memory_ids))})', memory_ids)
     conn.commit()
     conn.close()
 
@@ -96,7 +130,16 @@ def save_messages(lines):
         f.write('\n'.join(lines))
 
 def format_message(message):
-    channel_name = message.channel.name
+    channel = message.channel
+    if isinstance(channel, discord.DMChannel):
+        channel_name = "DM"
+    elif isinstance(channel, discord.Thread):
+        parent_name = channel.parent.name if channel.parent else "unknown"
+        channel_name = f"{parent_name}/{channel.name}"
+    elif channel.type == discord.ChannelType.voice:
+        channel_name = f"{channel.name}[VC text]"
+    else:
+        channel_name = channel.name
     user_name = message.author.name
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
 
@@ -108,11 +151,12 @@ def format_message(message):
         content = content.replace(f"<@{user.id}>", f"@{user.display_name}")
     for role in message.role_mentions:
         content = content.replace(f"<@&{role.id}>", f"@{role.name}")
+    content = content.replace('\n', '  ')
 
     if message.embeds:
         for embed in message.embeds:
             parts = []
-            if embed.author.name:
+            if embed.author and embed.author.name:
                 parts.append(embed.author.name)
             if embed.title:
                 parts.append(embed.title)
@@ -122,7 +166,7 @@ def format_message(message):
                 content += " [embed: " + " | ".join(parts) + "]"
 
     for attachment in message.attachments:
-        content += f" [file: {attachment.filename}]"
+        content += f" [file: {attachment.filename} ({attachment.url})]"
 
     line = f'#{channel_name} {timestamp} @{user_name}: "{content.strip()}"'
 
@@ -151,15 +195,15 @@ def should_respond(message):
         or random.random() < RANDOM_RESPONSE_CHANCE
     )
 
-def web_search(query: str) -> str:
+async def web_search(query: str) -> str:
     try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=3))
-            if not results:
-                return "No results found."
-            return "\n".join(
-                f"{r['title']}: {r['body']}" for r in results
-            )
+        loop = asyncio.get_running_loop()
+        results = await loop.run_in_executor(None, lambda: list(DDGS().text(query, max_results=3)))
+        if not results:
+            return "No results found."
+        return "\n".join(
+            f"{r['title']}: {r['body']}" for r in results
+        )
     except Exception as e:
         return f"Search failed: {e}"
     
@@ -170,7 +214,7 @@ async def web_fetch(url: str) -> str:
                 text = await resp.text()
                 text = re.sub(r'<[^>]+>', '', text)
                 text = re.sub(r'\s+', ' ', text).strip()
-                return text[:10000]
+                return text[:INPUT_CHAR_CAP]
     except Exception as e:
         return f"Fetch failed: {e}"
     
@@ -187,7 +231,7 @@ async def wolfram_query(query: str) -> str:
 
 async def image_search(query: str):
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         results = await loop.run_in_executor(None, lambda: list(DDGS().images(query, max_results=5, safesearch='off', type_image="photo")))
         if not results:
             return None, "DDGS returned no results."
@@ -218,13 +262,20 @@ async def on_message_edit(before, after):
 
 @client.event
 async def on_message(message):
+    if isinstance(message.channel, discord.DMChannel):
+        return
+
     lines = load_messages()
     new_line = format_message(message)
     lines.append(new_line)
+    save_messages(lines)
+
+    if not should_respond(message):
+        return
 
     if len(lines) > MAX_MESSAGES:
-        to_summarize = lines[:TRUNCATION]
-        lines = lines[TRUNCATION:]
+        to_summarize = lines[:len(lines) - TRUNCATION]
+        lines = lines[len(lines) - TRUNCATION:]
         print(f"\n\nContext limit hit. Summarizing and truncating...")
         try:
             summary_response = await anthropic_client.messages.create(
@@ -233,14 +284,21 @@ async def on_message(message):
                 messages=[{"role": "user", "content": "Summarize these chat messages briefly for a chatbot without formatting, preserving key topics, names, and context:\n" + "\n".join(to_summarize)}]
             )
             summary = summary_response.content[0].text
+            summary_tokens_in = summary_response.usage.input_tokens
+            summary_tokens_out = summary_response.usage.output_tokens
+            summary_cache_read = getattr(summary_response.usage, 'cache_read_input_tokens', 0)
+            summary_cache_write = getattr(summary_response.usage, 'cache_creation_input_tokens', 0)
+            summary_cost = (
+                (summary_tokens_in / 1_000_000) * INPUT_TOKENS_COST +
+                (summary_tokens_out / 1_000_000) * OUTPUT_TOKENS_COST +
+                (summary_cache_write / 1_000_000) * (INPUT_TOKENS_COST * 1.25) +
+                (summary_cache_read / 1_000_000) * (INPUT_TOKENS_COST * 0.1)
+            )
+            print(f"SUMMARY TOKENS IN: {summary_tokens_in} OUT: {summary_tokens_out} | CACHE WRITE: {summary_cache_write} READ: {summary_cache_read} | ESTIMATED COST: ${summary_cost:.6f}")
         except Exception:
             summary = "Earlier conversation context unavailable."
         lines.insert(0, f"[Summary of earlier messages: {summary}]")
-
-    save_messages(lines)
-
-    if not should_respond(message):
-        return
+        save_messages(lines)
 
     now = datetime.now().timestamp()
     user_id = message.author.id
@@ -255,67 +313,40 @@ async def on_message(message):
     async with message.channel.typing():
         tool_notes = []
 
-        conversation_history = "\n".join(lines[:-1]) + "\nRESPOND TO: " + new_line
+        all_lines = lines[:-1]
+        n = len(all_lines)
+        cached_count = n - (n % 10)
+        cached_lines = all_lines[:cached_count]
+        live_lines = all_lines[cached_count:]
 
-        content = [{"type": "text", "text": conversation_history}]
-
-        TEXT_EXTENSIONS = {
-            '.txt', '.md', '.py', '.js', '.ts', '.cpp', '.c', '.h', '.hpp',
-            '.java', '.cs', '.go', '.rs', '.rb', '.php', '.html', '.css',
-            '.json', '.xml', '.yaml', '.yml', '.toml', '.ini', '.cfg',
-            '.sh', '.bat', '.ps1', '.sql', '.r', '.swift', '.kt'
-        }
-
-        if message.attachments:
-            for attachment in message.attachments:
-                ct = attachment.content_type or ""
-                ext = os.path.splitext(attachment.filename)[1].lower()
-
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(attachment.url) as resp:
-                        file_data = await resp.read()
-
-                if ct.startswith("image/"):
-                    tool_notes.append(f"-# Analyzed {attachment.filename}")
-                    content.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": ct,
-                            "data": base64.b64encode(file_data).decode("utf-8")
-                        }
-                    })
-                elif ct == "application/pdf" or ext == ".pdf":
-                    tool_notes.append(f"-# Read {attachment.filename}")
-                    content.append({
-                        "type": "document",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "application/pdf",
-                            "data": base64.b64encode(file_data).decode("utf-8")
-                        }
-                    })
-                elif ext in TEXT_EXTENSIONS or ct.startswith("text/"):
-                    try:
-                        text_content = file_data.decode("utf-8")
-                        tool_notes.append(f"-# Read {attachment.filename}")
-                        content.append({
-                            "type": "text",
-                            "text": f"[File: {attachment.filename}]\n{text_content}"
-                        })
-                    except UnicodeDecodeError:
-                        tool_notes.append(f"-# Failed to read {attachment.filename} (encoding error)")
-                else:
-                    tool_notes.append(f"-# Skipped {attachment.filename} (unsupported type)")
+        content = []
+        if cached_lines:
+            content.append({
+                "type": "text",
+                "text": "\n".join(cached_lines),
+                "cache_control": {"type": "ephemeral"}
+            })
+        live_text = ("\n".join(live_lines) + "\n" if live_lines else "") + "RESPOND TO: " + new_line
+        content.append({"type": "text", "text": live_text})
 
         messages = [{"role": "user", "content": content}]
         image_to_send = None
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_cache_read_tokens = 0
+        total_cache_write_tokens = 0
+        response_text = "*no response*"
         try:
             while True:
-                response = await anthropic_client.messages.create(
+                try:
+                    response = await anthropic_client.messages.create(
                     model=MODEL,
                     max_tokens=MAX_TOKENS,
-                    system=system_prompt,
+                    system=[{
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"}
+                    }],
                     tools=[{
                         "name": "web_search",
                         "description": "Search the web for current information",
@@ -351,11 +382,11 @@ async def on_message(message):
                     },
                     {
                         "name": "remember",
-                        "description": "Save something worth remembering to long-term memory. Use conservatively — only for clear facts, preferences, or important context. Do NOT use for casual conversation. Do NOT use special characters, brackets or punctuation.",
+                        "description": "Save one or more facts to long-term memory. Use conservatively — only for clear facts, preferences, or important context. Do NOT use for casual conversation. Do NOT use special characters, brackets or punctuation.",
                         "input_schema": {
                             "type": "object",
                             "properties": {
-                                "memory": {"type": "string", "description": "The fact to remember"}
+                                "memory": {"type": ["string", "array"], "items": {"type": "string"}, "description": "A fact or list of facts to remember"}
                             },
                             "required": ["memory"]
                         }
@@ -373,11 +404,11 @@ async def on_message(message):
                     },
                     {
                         "name": "delete_memory",
-                        "description": "Delete a specific memory entry by ID. Use recall_memory first to find the ID, then delete it. Chain with remember to correct outdated information.",
+                        "description": "Delete one or more memory entries by ID. Use recall_memory first to find IDs, then delete. Chain with remember to correct outdated information.",
                         "input_schema": {
                             "type": "object",
                             "properties": {
-                                "memory_id": {"type": "integer", "description": "The ID of the memory to delete"}
+                                "memory_id": {"type": ["integer", "array"], "items": {"type": "integer"}, "description": "An ID or list of IDs to delete"}
                             },
                             "required": ["memory_id"]
                         }
@@ -403,42 +434,73 @@ async def on_message(message):
                             },
                             "required": ["query"]
                         }
+                    },
+                    {
+                        "name": "file_fetch",
+                        "description": f"Fetch a non-text file from a URL and analyze it. Use for images ({', '.join(IMAGE_EXTENSIONS)}) and PDFs. For text files ({', '.join(TEXT_EXTENSIONS)}), use web_fetch instead.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "url": {"type": "string", "description": "Direct URL to the file"}
+                            },
+                            "required": ["url"]
+                        }
                     }],
                     messages=messages
                 )
+                except Exception as e:
+                    response_text = f"*tool call failed: {e}*"
+                    break
 
                 if response.stop_reason == "tool_use":
+                    total_input_tokens += response.usage.input_tokens
+                    total_output_tokens += response.usage.output_tokens
+                    total_cache_read_tokens += getattr(response.usage, 'cache_read_input_tokens', 0)
+                    total_cache_write_tokens += getattr(response.usage, 'cache_creation_input_tokens', 0)
                     tool_uses = [b for b in response.content if b.type == "tool_use"]
                     tool_results = []
                     
                     for tool_use in tool_uses:
+                        print(f"TOOL: {tool_use.name} | INPUT: {tool_use.input}")
                         if tool_use.name == "web_search":
                             query = tool_use.input["query"]
-                            result = web_search(query)
-                            tool_notes.append(f"-# Searched the web for {query}")
+                            result = await web_search(query)
+                            tool_notes.append(f"-# Searched the web: {query}")
                         elif tool_use.name == "web_fetch":
                             url = tool_use.input["url"]
-                            result = await web_fetch(url)
-                            tool_notes.append(f"-# Fetched <{url}>")
+                            ext = os.path.splitext(url.split('?')[0])[1].lower()
+                            if ext in BLOCKED_EXTENSIONS:
+                                result = "Unsupported file format, cannot read this file type."
+                                tool_notes.append(f"-# Web fetch failed")
+                            elif ext in IMAGE_EXTENSIONS or ext == '.pdf':
+                                result = "Cannot fetch binary file with web_fetch. Use file_fetch instead."
+                                tool_notes.append(f"-# Web fetch failed")
+                            else:
+                                result = await web_fetch(url)
+                                tool_notes.append(f"-# Fetched: <{url}>")
                         elif tool_use.name == "wolfram_query":
                             query = tool_use.input["query"]
                             result = await wolfram_query(query)
-                            tool_notes.append(f"-# Queried Wolfram Alpha for {query}")
+                            tool_notes.append(f"-# Queried Wolfram Alpha: {query}")
                         elif tool_use.name == "remember":
                             memory = tool_use.input["memory"]
-                            save_memory(memory)
-                            result = f"Remembered: {memory}"
-                            tool_notes.append(f"-# Remembered: {memory}")
+                            memories = memory if isinstance(memory, list) else [memory]
+                            save_memory(memories)
+                            result = f"Remembered {len(memories)} item(s)"
+                            for m in memories:
+                                tool_notes.append(f"-# Remembered: {m}")
                         elif tool_use.name == "recall_memory":
                             query = tool_use.input["query"]
                             results = recall_memories(query)
                             result = "\n".join(results) if results else "Nothing found."
-                            tool_notes.append(f"-# Recalled memories for {query}")
+                            tool_notes.append(f"-# Recalled memories: {query}")
                         elif tool_use.name == "delete_memory":
                             memory_id = tool_use.input["memory_id"]
-                            delete_memory(memory_id)
-                            result = f"Deleted memory {memory_id}"
-                            tool_notes.append(f"-# Deleted memory entry {memory_id}")
+                            ids = memory_id if isinstance(memory_id, list) else [memory_id]
+                            delete_memory(ids)
+                            result = f"Deleted {len(ids)} memory entry(s)"
+                            for i in ids:
+                                tool_notes.append(f"-# Deleted memory entry: {i}")
                         elif tool_use.name == "continue_task":
                             task = tool_use.input["task"]
                             result = "Continuing..."
@@ -450,10 +512,65 @@ async def on_message(message):
                             if img_url:
                                 image_to_send = img_url
                                 result = f"Found image for '{query}'"
-                                tool_notes.append(f"-# Found image for {query}")
+                                tool_notes.append(f"-# Found image: {query}")
                             else:
                                 result = error
                                 tool_notes.append(f"-# Image search failed for {query}: {error}")
+                        elif tool_use.name == "file_fetch":
+                            url = tool_use.input["url"]
+                            ext = os.path.splitext(url.split('?')[0])[1].lower()
+                            if ext in BLOCKED_EXTENSIONS:
+                                result = "Unsupported file format, cannot read this file type."
+                                tool_notes.append(f"-# File fetch failed")
+                            elif ext in TEXT_EXTENSIONS:
+                                result = "Cannot fetch text file with file_fetch. Use web_fetch instead."
+                                tool_notes.append(f"-# File fetch failed")
+                            else:
+                                try:
+                                    async with aiohttp.ClientSession() as session:
+                                        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                                            file_data = await resp.read()
+                                    if ext == '.pdf':
+                                        tool_results.append({
+                                            "type": "tool_result",
+                                            "tool_use_id": tool_use.id,
+                                            "content": [{
+                                                "type": "document",
+                                                "source": {
+                                                    "type": "base64",
+                                                    "media_type": "application/pdf",
+                                                    "data": base64.b64encode(file_data).decode("utf-8")
+                                                }
+                                            }]
+                                        })
+                                    else:
+                                        if file_data[:8] == b'\x89PNG\r\n\x1a\n':
+                                            media_type = "image/png"
+                                        elif file_data[:3] == b'\xff\xd8\xff':
+                                            media_type = "image/jpeg"
+                                        elif file_data[:4] == b'GIF8':
+                                            media_type = "image/gif"
+                                        elif file_data[:4] == b'RIFF' and file_data[8:12] == b'WEBP':
+                                            media_type = "image/webp"
+                                        else:
+                                            media_type = "image/jpeg"
+                                        tool_results.append({
+                                            "type": "tool_result",
+                                            "tool_use_id": tool_use.id,
+                                            "content": [{
+                                                "type": "image",
+                                                "source": {
+                                                    "type": "base64",
+                                                    "media_type": media_type,
+                                                    "data": base64.b64encode(file_data).decode("utf-8")
+                                                }
+                                            }]
+                                        })
+                                    tool_notes.append(f"-# Fetched file: <{url}>")
+                                    continue
+                                except Exception as e:
+                                    result = f"File fetch failed: {e}, have you tried web_fetch instead?"
+                                    tool_notes.append(f"-# File fetch failed: {e}")
                         else:
                             result = "Tool not recognized."
                         
@@ -466,11 +583,15 @@ async def on_message(message):
                     messages.append({"role": "assistant", "content": response.content})
                     messages.append({"role": "user", "content": tool_results})
                 else:
+                    total_input_tokens += response.usage.input_tokens
+                    total_output_tokens += response.usage.output_tokens
+                    total_cache_read_tokens += getattr(response.usage, 'cache_read_input_tokens', 0)
+                    total_cache_write_tokens += getattr(response.usage, 'cache_creation_input_tokens', 0)
                     response_text = next((b.text for b in response.content if hasattr(b, "text")), "")
                     break
         except Exception as e:
             await message.reply("*something went wrong*")
-            print(f"ERROR: {e}")
+            print(f"ERROR: {e}\n")
             return
 
         response_text = response_text.replace('\n\n', '\n').replace('@', '')
@@ -488,14 +609,12 @@ async def on_message(message):
         else:
             await message.reply(response_text)
         if image_to_send:
-            embed = discord.Embed()
-            embed.set_image(url=image_to_send)
-            await message.channel.send(embed=embed)
-        print(f"\nDEBUG: {new_line}\nTOKENS IN: {response.usage.input_tokens} OUT: {response.usage.output_tokens}\nRESPONSE: {response_text}")
+            await message.channel.send(image_to_send)
+        cost = (
+            (total_input_tokens / 1000000) * INPUT_TOKENS_COST +
+            (total_output_tokens / 1000000) * OUTPUT_TOKENS_COST +
+            (total_cache_write_tokens / 1000000) * (INPUT_TOKENS_COST * 1.25) +
+            (total_cache_read_tokens / 1000000) * (INPUT_TOKENS_COST * 0.1)
+        )
+        print(f"\nDEBUG: {new_line}\nTOKENS IN: {total_input_tokens} OUT: {total_output_tokens} | CACHE WRITE: {total_cache_write_tokens} READ: {total_cache_read_tokens}\nESTIMATED COST: ${cost:.5f} MODEL: {MODEL} \nRESPONSE: {response_text}\n")
 client.run(discord_token)
-
-
-
-
-# managed to keep all this under 500 lines yay
-
