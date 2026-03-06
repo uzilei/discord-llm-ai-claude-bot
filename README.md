@@ -16,7 +16,7 @@ Doesn't support DMs and technically doesn't support cross-server usage (input fo
 - Many configurable variables within the code
 - Rolling message history with automatic summarization on truncation
 - Per-user rate limiting (very basic)
-- Web search via DuckDuckGo
+- Web search via DuckDuckGo or Tavily (optional, set `TAVILY_API_KEY`)
 - Web fetch with HTML stripping
 - Wolfram Alpha integration for math, science, and unit conversions
 - Image search via DuckDuckGo (for some reason, ran into the most trouble with this, use at own discretion) (opted for this instead of image generation, I am against it)
@@ -37,6 +37,7 @@ Doesn't support DMs and technically doesn't support cross-server usage (input fo
 - **Anthropic API key** — get it from [platform.claude.com/settings/keys](https://platform.claude.com/settings/keys) after making an account and paying at least $5 in credits
 - **Discord bot token** — get it from [discord.com/developers/applications](https://discord.com/developers/applications)
 - **Wolfram Alpha App ID** *(optional)* — get it from [developer.wolframalpha.com](https://developer.wolframalpha.com). Required for math and science queries. Free tier gives 2000 queries/month
+- **Tavily API key** *(optional)* — get it from [app.tavily.com](https://app.tavily.com). When set, web search uses Tavily instead of DuckDuckGo. Free tier gives 1000 API credits/month
 
 ### Bot permissions
 
@@ -55,13 +56,14 @@ Enable **Message Content Intent** and the following permissions:
 1. Clone the repo or download the latest .zip in Releases
 2. Install dependencies:
    ```
-   pip install py-cord anthropic aiohttp python-dotenv ddgs
+   pip install py-cord anthropic aiohttp python-dotenv ddgs tavily-python
    ```
 3. Fill in `.env`:
    ```
    ANTHROPIC_API_KEY=your_key_here
    DISCORD_TOKEN=your_token_here
    WOLFRAM_APP_ID=your_id_here
+   TAVILY_API_KEY=your_key_here
    ```
 4. Edit `systemprompt.txt` to give the bot a personality and any formatting rules
 5. Edit `aliases.json` to map Discord usernames to nicknames. Or map any text with anything else
