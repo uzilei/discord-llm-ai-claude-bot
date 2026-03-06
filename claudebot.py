@@ -12,6 +12,11 @@ from datetime import datetime
 from dotenv import load_dotenv
 from ddgs import DDGS
 
+try:
+    from tavily import TavilyClient
+except ImportError:
+    TavilyClient = None
+
 # ── Configuration ─────────────────────────────────────────────────────────────
 # .env file should contain: ANTHROPIC_API_KEY, DISCORD_TOKEN, WOLFRAM_APP_ID (optional)
 
@@ -52,6 +57,7 @@ client = discord.Bot(intents=intents)
 anthropic_client = anthropic.AsyncAnthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
 discord_token = os.getenv('DISCORD_TOKEN')
 wolfram_app_id = os.getenv('WOLFRAM_APP_ID')
+tavily_client = TavilyClient() if TavilyClient and os.getenv('TAVILY_API_KEY') else None
 
 TEXT_EXTENSIONS = {
     '.txt', '.md', '.py', '.js', '.ts', '.cpp', '.c', '.h', '.hpp',
@@ -203,6 +209,18 @@ def should_respond(message):
     )
 
 async def web_search(query: str) -> str:
+    if tavily_client:
+        try:
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, lambda: tavily_client.search(query, max_results=3))
+            results = response.get("results", [])
+            if not results:
+                return "No results found."
+            return "\n".join(
+                f"{r['title']}: {r.get('content', '')}" for r in results
+            )
+        except Exception as e:
+            return f"Search failed: {e}"
     try:
         loop = asyncio.get_running_loop()
         results = await loop.run_in_executor(None, lambda: list(DDGS().text(query, max_results=3)))
