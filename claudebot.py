@@ -1,4 +1,5 @@
 import json
+import time
 import re
 import sqlite3
 import discord
@@ -20,19 +21,20 @@ SUMMARY_MODEL = "claude-haiku-4-5" # model to use to summarize context, changing
 TRIGGER_KEYWORDS = ["claude", "clanker"]  # keywords that trigger a response
 IGNORED_USERS = ["SamAltman", "MEE6"]  # usernames to ignore, case sensitive
 
-MAX_MESSAGES = 150  # max messages before truncation and summary
-TRUNCATION = 50  # how many messages are left after truncating
+MAX_MESSAGES = 75  # max messages before truncation and summary
+TRUNCATION = 30  # how many messages are left after truncating
 MAX_TOKENS = 5000  # max output tokens per response
-INPUT_CHAR_CAP = 20000  # max characters for any single text input (web fetch, file reads)
-RANDOM_RESPONSE_CHANCE = 0.001  # chance to respond unprompted (1 in 1000 default)
+INPUT_CHAR_CAP = 20000  # max characters for any single text input (including web fetch, file reads)
+RANDOM_RESPONSE_CHANCE = 0.002  # chance to respond unprompted (1 in 500 default)
 RATE_LIMIT_WINDOW = 5  # rate limit window in seconds
 RATE_LIMIT_MESSAGES = 2  # max messages per user within the window
 
 USE_LONG_CACHE = False  # True for 1h cache, False for 5m cache. change according to bot usage frequency. most use cases benefit from False
 CACHE_BLOCK_SIZE = 10  # number of messages per cache block (cached_count = n - (n % CACHE_BLOCK_SIZE))
 
-STARTING_PROMPT_FILE = 'systemprompt.txt'  # system prompt file
+STARTING_PROMPT_FILE = 'system_prompt.txt'  # system prompt file
 MESSAGES_FILE = 'messages.txt'  # rolling message log file... yes you python nerds i should've done this in a dictionary or whatever, but too late now
+LATEST_PROMPT_FILE = 'latest_prompt.txt'  # stores exactly how the latest prompt looks like for debug reasons
 
 # values used for cost estimation in dollars per million tokens, uses haiku 4.5's costs by default but change according to the pricing table if you want more accurate estimates
 INPUT_TOKENS_COST = 1.0
@@ -77,14 +79,110 @@ BLOCKED_EXTENSIONS = {
 }
 
 user_message_times = {}
+last_cache_write_time = 0.0
 
 CACHE_CONTROL = {"type": "ephemeral", "ttl": "1h"} if USE_LONG_CACHE else {"type": "ephemeral"}
 
 with open(STARTING_PROMPT_FILE, 'r', encoding='utf-8') as file:
-    system_prompt = file.read()
+    system_prompt = f"<system>\n{file.read()}\n</system>"
 
 with open('aliases.json', 'r', encoding='utf-8') as f:
     aliases = json.load(f)
+
+_image_ext_str = ', '.join(sorted(IMAGE_EXTENSIONS))
+_text_ext_str = ', '.join(sorted(TEXT_EXTENSIONS))
+
+TOOLS = [
+    {
+        "name": "web_search",
+        "description": "Search the web for current information",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"}
+            },
+            "required": ["query"]
+        },
+    },
+    {
+        "name": "web_fetch",
+        "description": "Fetch the contents of a webpage by URL. Optionally chain with web_search to get details from a search.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "The URL to fetch"}
+            },
+            "required": ["url"]
+        }
+    },
+    {
+        "name": "wolfram_query",
+        "description": "Query Wolfram Alpha for mathematical calculations, scientific facts, unit conversions, and real-world data",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The query to send to Wolfram Alpha"}
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "remember",
+        "description": "Save one or more facts to long-term memory. Use conservatively — only for clear facts, preferences, or important context. Do NOT use for casual conversation. Do NOT use special characters, brackets or punctuation.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "memory": {"type": ["string", "array"], "items": {"type": "string"}, "description": "A fact or list of facts to remember"}
+            },
+            "required": ["memory"]
+        }
+    },
+    {
+        "name": "recall_memory",
+        "description": "Search long-term memory for stored facts. Use when you need to remember something about a user or the server. Use non-specific KEYWORDS, NOT phrases.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Keyword to search memories for"}
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "delete_memory",
+        "description": "Delete one or more memory entries by ID. Use recall_memory first to find IDs, then delete. Chain with remember to correct outdated information.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "memory_id": {"type": ["integer", "array"], "items": {"type": "integer"}, "description": "An ID or list of IDs to delete"}
+            },
+            "required": ["memory_id"]
+        }
+    },
+
+    {
+        "name": "image_search",
+        "description": "Search for an image and send it in chat",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Image search query"}
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "file_fetch",
+        "description": f"Fetch a non-text file from a URL and analyze it. Use for images ({_image_ext_str}) and PDFs. For text files ({_text_ext_str}), use web_fetch instead.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Direct URL to the file"}
+            },
+            "required": ["url"]
+        }
+    }
+]
 
 def init_db():
     conn = sqlite3.connect('memory.db')
@@ -126,6 +224,21 @@ def delete_memory(memory_ids):
     conn.close()
 
 init_db()
+
+
+def get_cache_read_tokens(usage):
+    v = getattr(usage, 'cache_read_input_tokens', None)
+    if v: return v
+    cc = getattr(usage, 'cache_creation', None)
+    if cc: return getattr(cc, 'ephemeral_5m_input_tokens', 0) + getattr(cc, 'ephemeral_1h_input_tokens', 0)
+    return 0
+
+def get_cache_write_tokens(usage):
+    v = getattr(usage, 'cache_creation_input_tokens', None)
+    if v: return v
+    cc = getattr(usage, 'cache_creation', None)
+    if cc: return getattr(cc, 'ephemeral_5m_input_tokens', 0) + getattr(cc, 'ephemeral_1h_input_tokens', 0)
+    return 0
 
 def load_messages():
     with open(MESSAGES_FILE, 'r', encoding='utf-8') as f:
@@ -192,15 +305,15 @@ def format_message(message):
 
 def should_respond(message):
     if message.author == client.user:
-        return False
+        return False, False
     if message.author.name in IGNORED_USERS:
-        return False
+        return False, False
     content = message.content.lower()
-    return (
-        client.user.mentioned_in(message)
-        or any(k in content for k in TRIGGER_KEYWORDS)
-        or random.random() < RANDOM_RESPONSE_CHANCE
-    )
+    if client.user.mentioned_in(message) or any(k in content for k in TRIGGER_KEYWORDS):
+        return True, False
+    if random.random() < RANDOM_RESPONSE_CHANCE:
+        return True, True
+    return False, False
 
 async def web_search(query: str) -> str:
     try:
@@ -277,7 +390,8 @@ async def on_message(message):
     lines.append(new_line)
     save_messages(lines)
 
-    if not should_respond(message):
+    respond, is_random = should_respond(message)
+    if not respond:
         return
 
     if len(lines) > MAX_MESSAGES:
@@ -288,13 +402,13 @@ async def on_message(message):
             summary_response = await anthropic_client.messages.create(
                 model=SUMMARY_MODEL,
                 max_tokens=MAX_TOKENS,
-                messages=[{"role": "user", "content": "Summarize these chat messages briefly for a chatbot without formatting, preserving key topics, names, and context:\n" + "\n".join(to_summarize)}]
+                messages=[{"role": "user", "content": "Summarize these chat messages briefly for yourself (Claude) without formatting, preserving key topics, names, and context:\n" + "\n".join(to_summarize)}]
             )
             summary = summary_response.content[0].text
             summary_tokens_in = summary_response.usage.input_tokens
             summary_tokens_out = summary_response.usage.output_tokens
-            summary_cache_read = getattr(summary_response.usage, 'cache_read_input_tokens', 0)
-            summary_cache_write = getattr(summary_response.usage, 'cache_creation_input_tokens', 0)
+            summary_cache_read = get_cache_read_tokens(summary_response.usage)
+            summary_cache_write = get_cache_write_tokens(summary_response.usage)
             summary_cost = (
                 (summary_tokens_in / 1_000_000) * INPUT_TOKENS_COST +
                 (summary_tokens_out / 1_000_000) * OUTPUT_TOKENS_COST +
@@ -304,7 +418,7 @@ async def on_message(message):
             print(f"SUMMARY TOKENS IN: {summary_tokens_in} OUT: {summary_tokens_out} | CACHE WRITE: {summary_cache_write} READ: {summary_cache_read} | ESTIMATED COST: ${summary_cost:.6f}")
         except Exception:
             summary = "Earlier conversation context unavailable."
-        lines.insert(0, f"[Summary of earlier messages: {summary}]")
+        lines.insert(0, f"<summary>\nSummary of previous messages: {summary}\n</summary>")
         save_messages(lines)
 
     now = datetime.now().timestamp()
@@ -316,6 +430,7 @@ async def on_message(message):
         return
     times.append(now)
     user_message_times[user_id] = times
+    global last_cache_write_time
 
     async with message.channel.typing():
         tool_notes = []
@@ -333,11 +448,20 @@ async def on_message(message):
                 "text": "\n".join(cached_lines),
                 "cache_control": CACHE_CONTROL
             })
-        live_text = ("\n".join(live_lines) + "\n" if live_lines else "") + "RESPOND TO: " + new_line
+        respond_prefix = "CHIME IN AFTER: " if is_random else "RESPOND TO: "
+        cache_ttl = 3600 if USE_LONG_CACHE else 300
+        cache_is_warm = (time.time() - last_cache_write_time) < cache_ttl
+        cache_status = "WARM" if cache_is_warm else "COLD (avoid using tools, ask to chat more)"
+        live_text = ("\n".join(live_lines) + "\n" if live_lines else "") + f"[Cache status: {cache_status}]\n" + respond_prefix + new_line
         content.append({"type": "text", "text": live_text})
+        with open(LATEST_PROMPT_FILE, 'w', encoding='utf-8') as f:
+            f.write(system_prompt + "\n")
+            for block in content:
+                f.write(block.get('text', '') + '\n')
 
         messages = [{"role": "user", "content": content}]
         image_to_send = None
+        has_replied = False
         total_input_tokens = 0
         total_output_tokens = 0
         total_cache_read_tokens = 0
@@ -354,116 +478,30 @@ async def on_message(message):
                         "text": system_prompt,
                         "cache_control": CACHE_CONTROL
                     }],
-                    tools=[{
-                        "name": "web_search",
-                        "description": "Search the web for current information",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string", "description": "Search query"}
-                            },
-                            "required": ["query"]
-                        },
-                    },
-                    {
-                        "name": "web_fetch",
-                        "description": "Fetch the contents of a webpage by URL. Optionally chain with web_search to get details from a search.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "url": {"type": "string", "description": "The URL to fetch"}
-                            },
-                            "required": ["url"]
-                        }
-                    },
-                    {
-                        "name": "wolfram_query",
-                        "description": "Query Wolfram Alpha for mathematical calculations, scientific facts, unit conversions, and real-world data",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string", "description": "The query to send to Wolfram Alpha"}
-                            },
-                            "required": ["query"]
-                        }
-                    },
-                    {
-                        "name": "remember",
-                        "description": "Save one or more facts to long-term memory. Use conservatively — only for clear facts, preferences, or important context. Do NOT use for casual conversation. Do NOT use special characters, brackets or punctuation.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "memory": {"type": ["string", "array"], "items": {"type": "string"}, "description": "A fact or list of facts to remember"}
-                            },
-                            "required": ["memory"]
-                        }
-                    },
-                    {
-                        "name": "recall_memory",
-                        "description": "Search long-term memory for stored facts. Use when you need to remember something about a user or the server. Use non-specific KEYWORDS, NOT phrases.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string", "description": "Keyword to search memories for"}
-                            },
-                        "required": ["query"]
-                        }
-                    },
-                    {
-                        "name": "delete_memory",
-                        "description": "Delete one or more memory entries by ID. Use recall_memory first to find IDs, then delete. Chain with remember to correct outdated information.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "memory_id": {"type": ["integer", "array"], "items": {"type": "integer"}, "description": "An ID or list of IDs to delete"}
-                            },
-                            "required": ["memory_id"]
-                        }
-                    },
-                    {
-                        "name": "continue_task",
-                        "description": "Use this to think through a multi-step task or plan your next action. You MUST call another tool immediately after this one — NEVER generate a raw response mid-task. Put all reasoning and planning in the task field instead of responding with text. Only stop calling tools when the task is fully complete.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "task": {"type": "string", "description": "What you're doing next"}
-                            },
-                            "required": ["task"]
-                        }
-                    },
-                    {
-                        "name": "image_search",
-                        "description": "Search for an image and send it in chat",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string", "description": "Image search query"}
-                            },
-                            "required": ["query"]
-                        }
-                    },
-                    {
-                        "name": "file_fetch",
-                        "description": f"Fetch a non-text file from a URL and analyze it. Use for images ({', '.join(IMAGE_EXTENSIONS)}) and PDFs. For text files ({', '.join(TEXT_EXTENSIONS)}), use web_fetch instead.",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {
-                                "url": {"type": "string", "description": "Direct URL to the file"}
-                            },
-                            "required": ["url"]
-                        }
-                    }],
+                    tools=TOOLS,
                     messages=messages
                 )
                 except Exception as e:
                     response_text = f"*tool call failed: {e}*"
                     break
+                
 
                 if response.stop_reason == "tool_use":
                     total_input_tokens += response.usage.input_tokens
                     total_output_tokens += response.usage.output_tokens
-                    total_cache_read_tokens += getattr(response.usage, 'cache_read_input_tokens', 0)
-                    total_cache_write_tokens += getattr(response.usage, 'cache_creation_input_tokens', 0)
+                    total_cache_read_tokens += get_cache_read_tokens(response.usage)
+                    total_cache_write_tokens += get_cache_write_tokens(response.usage)
+                    pre_text = next((b.text for b in response.content if hasattr(b, "text")), "").strip()
+                    if pre_text:
+                        pre_text = pre_text.replace('\n\n', '\n').replace('@', '')
+                        if tool_notes:
+                            pre_text = "\n".join(tool_notes) + "\n" + pre_text
+                            tool_notes = []
+                        if not has_replied:
+                            await message.reply(pre_text)
+                            has_replied = True
+                        else:
+                            await message.channel.send(pre_text)
                     tool_uses = [b for b in response.content if b.type == "tool_use"]
                     tool_results = []
                     
@@ -508,11 +546,7 @@ async def on_message(message):
                             result = f"Deleted {len(ids)} memory entry(s)"
                             for i in ids:
                                 tool_notes.append(f"-# Deleted memory entry: {i}")
-                        elif tool_use.name == "continue_task":
-                            task = tool_use.input["task"]
-                            result = "Continuing..."
-                            print(f"THINKING: {task}")
-                            await message.channel.send("-# Thinking...")
+
                         elif tool_use.name == "image_search":
                             query = tool_use.input["query"]
                             img_url, error = await image_search(query)
@@ -592,8 +626,8 @@ async def on_message(message):
                 else:
                     total_input_tokens += response.usage.input_tokens
                     total_output_tokens += response.usage.output_tokens
-                    total_cache_read_tokens += getattr(response.usage, 'cache_read_input_tokens', 0)
-                    total_cache_write_tokens += getattr(response.usage, 'cache_creation_input_tokens', 0)
+                    total_cache_read_tokens += get_cache_read_tokens(response.usage)
+                    total_cache_write_tokens += get_cache_write_tokens(response.usage)
                     response_text = next((b.text for b in response.content if hasattr(b, "text")), "")
                     break
         except Exception as e:
@@ -610,11 +644,18 @@ async def on_message(message):
 
         if len(response_text) > 2000:
             chunks = [response_text[i:i+2000] for i in range(0, len(response_text), 2000)]
-            await message.reply(chunks[0])
+            if not has_replied:
+                await message.reply(chunks[0])
+                has_replied = True
+            else:
+                await message.channel.send(chunks[0])
             for chunk in chunks[1:]:
                 await message.channel.send(chunk)
         else:
-            await message.reply(response_text)
+            if not has_replied:
+                await message.reply(response_text)
+            else:
+                await message.channel.send(response_text)
         if image_to_send:
             await message.channel.send(image_to_send)
         cost = (
@@ -623,5 +664,7 @@ async def on_message(message):
             (total_cache_write_tokens / 1000000) * (INPUT_TOKENS_COST * 1.25) +
             (total_cache_read_tokens / 1000000) * (INPUT_TOKENS_COST * 0.1)
         )
+        if total_cache_write_tokens > 0:
+            last_cache_write_time = time.time()
         print(f"\nDEBUG: {new_line}\nTOKENS IN: {total_input_tokens} OUT: {total_output_tokens} | CACHE WRITE: {total_cache_write_tokens} READ: {total_cache_read_tokens}\nESTIMATED COST: ${cost:.5f} MODEL: {MODEL} \nRESPONSE: {response_text}\n")
 client.run(discord_token)
