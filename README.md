@@ -23,11 +23,12 @@ Doesn't support DMs and technically doesn't support cross-server usage (input fo
 - Image analysis via vision
 - PDF reading (native document block)
 - Code and text file reading (`.py`, `.cpp`, `.json`, `.md` and more)
-- Persistent memory via SQLite with recall, store, and delete
-- Agentic tool chaining with `continue_task` for multi-step autonomous work
+- Persistent memory via SQLite with recall, store, and delete (to be changed)
+- Agentic tool chaining with natural multi-step reasoning
 - Efficient use of cache control saving up to 4x the costs compared to usual LLM projects
 - Discord embed parsing
 - Message chunking for responses over 2000 characters
+- Cache status awareness to save money
 
 ---
 
@@ -63,7 +64,7 @@ Enable **Message Content Intent** and the following permissions:
    DISCORD_TOKEN=your_token_here
    WOLFRAM_APP_ID=your_id_here
    ```
-4. Edit `systemprompt.txt` to give the bot a personality and any formatting rules
+4. Edit `system_prompt.txt` to give the bot a personality and any formatting rules
 5. Edit `aliases.json` to map Discord usernames to nicknames. Or map any text with anything else
 6. Run `run_bot.bat` (Windows) or `run_bot.sh` (Linux)
 
@@ -78,10 +79,10 @@ All tunable values are at the top of `claudebot.py`, these are the most importan
 | `MODEL` | `claude-haiku-4-5` | Model to use |
 | `TRIGGER_KEYWORDS` | `["claude", "clanker"]` | Keywords that trigger a response |
 | `IGNORED_USERS` | `["SamAltman", "MEE6"]` | Usernames to ignore |
-| `MAX_MESSAGES` | `150` | Message history size before truncation |
-| `TRUNCATION` | `50` | Message count to summarize and drop to |
+| `MAX_MESSAGES` | `75` | Message history size before truncation |
+| `TRUNCATION` | `30` | Message count to summarize and drop to |
 | `MAX_TOKENS` | `5000` | Max output tokens per response |
-| `RANDOM_RESPONSE_CHANCE` | `0.005` | Chance to respond unprompted (1 in 200 default) |
+| `RANDOM_RESPONSE_CHANCE` | `0.002` | Chance to respond unprompted (1 in 500 default) |
 | `RATE_LIMIT_WINDOW` | `5` | Rate limit window in seconds |
 | `RATE_LIMIT_MESSAGES` | `2` | Max messages per user per window |
 
@@ -91,7 +92,7 @@ All tunable values are at the top of `claudebot.py`, these are the most importan
 
 - **Do NOT use this on a large server** — the rate limiting is minimal and wasn't designed for high traffic, unless you're a whale of course
 - The default system prompt is already tuned for maximum capability, just add a personality and some formatting rules on top
-- Expect it to burn a decent amount of tokens, especially with the default system prompt that encourages tool chaining and autonomous reasoning
+- Expect it to burn a decent amount of tokens, especially with the default system prompt
 
 ---
 
