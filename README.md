@@ -17,18 +17,20 @@ Doesn't support DMs and technically doesn't support cross-server usage (input fo
 - Rolling message history with automatic summarization on truncation
 - Per-user rate limiting (very basic)
 - Web search via DuckDuckGo
-- Web fetch with HTML stripping
-- Wolfram Alpha integration for math, science, and unit conversions
+- Web fetch with HTML stripping (includes uploaded text files)
+- Optional Wolfram Alpha integration for math, science, and unit conversions
 - Image search via DuckDuckGo (for some reason, ran into the most trouble with this, use at own discretion) (opted for this instead of image generation, I am against it)
 - Image analysis via vision
-- PDF reading (native document block)
+- PDF reading
 - Code and text file reading (`.py`, `.cpp`, `.json`, `.md` and more)
-- Persistent memory via SQLite with recall, store, and delete (to be changed)
-- Agentic tool chaining with natural multi-step reasoning
-- Efficient use of cache control saving up to 4x the costs compared to usual LLM projects
+- Persistent memory via a text file rewritten on demand
+- Agentic tool chaining with natural mid-task acknowledgment messages"
+- Efficient use of cache control saving up to 4x the costs compared to usual LLM projects (hopefully)
 - Discord embed parsing
 - Message chunking for responses over 2000 characters
-- Cache status awareness to save money
+- Reacting to messages with an emoji
+- SOON: Reasoning trigger
+- SOON: Voice mode (enter voice chat, listen and speak)
 
 ---
 
