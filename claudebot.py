@@ -1,7 +1,7 @@
 import json
 import time
 import re
-import sqlite3
+
 import discord
 import anthropic
 import aiohttp
@@ -35,6 +35,7 @@ CACHE_BLOCK_SIZE = 10  # number of messages per cache block (cached_count = n - 
 STARTING_PROMPT_FILE = 'system_prompt.txt'  # system prompt file
 MESSAGES_FILE = 'messages.txt'  # rolling message log file... yes you python nerds i should've done this in a dictionary or whatever, but too late now
 LATEST_PROMPT_FILE = 'latest_prompt.txt'  # stores exactly how the latest prompt looks like for debug reasons
+MEMORY_FILE = 'memory.txt'  # long-term memory file
 
 # values used for cost estimation in dollars per million tokens, uses haiku 4.5's costs by default but change according to the pricing table if you want more accurate estimates
 INPUT_TOKENS_COST = 1.0
@@ -84,7 +85,16 @@ last_cache_write_time = 0.0
 CACHE_CONTROL = {"type": "ephemeral", "ttl": "1h"} if USE_LONG_CACHE else {"type": "ephemeral"}
 
 with open(STARTING_PROMPT_FILE, 'r', encoding='utf-8') as file:
-    system_prompt = f"<system>\n{file.read()}\n</system>"
+    _base_prompt = file.read()
+def load_system_prompt():
+    try:
+        with open(MEMORY_FILE, 'r', encoding='utf-8') as f:
+            memory = f.read().strip()
+    except FileNotFoundError:
+        memory = ''
+    if memory:
+        return f'<system>\n{_base_prompt}\n</system>\n<memory>\n{memory}\n</memory>'
+    return f'<system>\n{_base_prompt}\n</system>\n<memory>\nEmpty\n</memory>'
 
 with open('aliases.json', 'r', encoding='utf-8') as f:
     aliases = json.load(f)
@@ -127,40 +137,6 @@ TOOLS = [
         }
     },
     {
-        "name": "remember",
-        "description": "Save one or more facts to long-term memory. Use conservatively — only for clear facts, preferences, or important context. Do NOT use for casual conversation. Do NOT use special characters, brackets or punctuation.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "memory": {"type": ["string", "array"], "items": {"type": "string"}, "description": "A fact or list of facts to remember"}
-            },
-            "required": ["memory"]
-        }
-    },
-    {
-        "name": "recall_memory",
-        "description": "Search long-term memory for stored facts. Use when you need to remember something about a user or the server. Use non-specific KEYWORDS, NOT phrases.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Keyword to search memories for"}
-            },
-            "required": ["query"]
-        }
-    },
-    {
-        "name": "delete_memory",
-        "description": "Delete one or more memory entries by ID. Use recall_memory first to find IDs, then delete. Chain with remember to correct outdated information.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "memory_id": {"type": ["integer", "array"], "items": {"type": "integer"}, "description": "An ID or list of IDs to delete"}
-            },
-            "required": ["memory_id"]
-        }
-    },
-
-    {
         "name": "image_search",
         "description": "Search for an image and send it in chat",
         "input_schema": {
@@ -169,6 +145,28 @@ TOOLS = [
                 "query": {"type": "string", "description": "Image search query"}
             },
             "required": ["query"]
+        }
+    },
+    {
+        "name": "react",
+        "description": "React to the message you are responding to with an emoji. Use when a reaction is more appropriate than a text response.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "emoji": {"type": "string", "description": "The emoji to react with"}
+            },
+            "required": ["emoji"]
+        }
+    },
+    {
+        "name": "write_memory",
+        "description": "Write or overwrite long-term memory. Pass the full memory content as a plain text string. Use for important facts, preferences, or context about users. Overwrites previous memory completely.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "Full memory content to save"}
+            },
+            "required": ["content"]
         }
     },
     {
@@ -183,48 +181,6 @@ TOOLS = [
         }
     }
 ]
-
-def init_db():
-    conn = sqlite3.connect('memory.db')
-    conn.execute('''CREATE TABLE IF NOT EXISTS memories (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        memory TEXT NOT NULL,
-        timestamp TEXT NOT NULL
-    )''')
-    conn.commit()
-    conn.close()
-
-def save_memory(memories):
-    if isinstance(memories, str):
-        memories = [memories]
-    conn = sqlite3.connect('memory.db')
-    conn.executemany('INSERT INTO memories (memory, timestamp) VALUES (?, ?)',
-                 [(m, datetime.now().isoformat()) for m in memories])
-    conn.commit()
-    conn.close()
-
-def recall_memories(query: str) -> list:
-    conn = sqlite3.connect('memory.db')
-    words = [w for w in query.lower().split() if w]
-    if not words:
-        conn.close()
-        return []
-    sql = "SELECT id, memory FROM memories WHERE " + " AND ".join(["LOWER(memory) LIKE ?" for _ in words])
-    params = [f'%{w}%' for w in words]
-    rows = conn.execute(sql + " ORDER BY timestamp DESC LIMIT 10", params).fetchall()
-    conn.close()
-    return [f"[id:{r[0]}] {r[1]}" for r in rows]
-
-def delete_memory(memory_ids):
-    if isinstance(memory_ids, int):
-        memory_ids = [memory_ids]
-    conn = sqlite3.connect('memory.db')
-    conn.execute(f'DELETE FROM memories WHERE id IN ({",".join("?" * len(memory_ids))})', memory_ids)
-    conn.commit()
-    conn.close()
-
-init_db()
-
 
 def get_cache_read_tokens(usage):
     v = getattr(usage, 'cache_read_input_tokens', None)
@@ -394,33 +350,6 @@ async def on_message(message):
     if not respond:
         return
 
-    if len(lines) > MAX_MESSAGES:
-        to_summarize = lines[:len(lines) - TRUNCATION]
-        lines = lines[len(lines) - TRUNCATION:]
-        print(f"\n\nContext limit hit. Summarizing and truncating...")
-        try:
-            summary_response = await anthropic_client.messages.create(
-                model=SUMMARY_MODEL,
-                max_tokens=MAX_TOKENS,
-                messages=[{"role": "user", "content": "Summarize these chat messages briefly for yourself (Claude) without formatting, preserving key topics, names, and context:\n" + "\n".join(to_summarize)}]
-            )
-            summary = summary_response.content[0].text
-            summary_tokens_in = summary_response.usage.input_tokens
-            summary_tokens_out = summary_response.usage.output_tokens
-            summary_cache_read = get_cache_read_tokens(summary_response.usage)
-            summary_cache_write = get_cache_write_tokens(summary_response.usage)
-            summary_cost = (
-                (summary_tokens_in / 1_000_000) * INPUT_TOKENS_COST +
-                (summary_tokens_out / 1_000_000) * OUTPUT_TOKENS_COST +
-                (summary_cache_write / 1_000_000) * (INPUT_TOKENS_COST * 1.25) +
-                (summary_cache_read / 1_000_000) * (INPUT_TOKENS_COST * 0.1)
-            )
-            print(f"SUMMARY TOKENS IN: {summary_tokens_in} OUT: {summary_tokens_out} | CACHE WRITE: {summary_cache_write} READ: {summary_cache_read} | ESTIMATED COST: ${summary_cost:.6f}")
-        except Exception:
-            summary = "Earlier conversation context unavailable."
-        lines.insert(0, f"<summary>\nSummary of previous messages: {summary}\n</summary>")
-        save_messages(lines)
-
     now = datetime.now().timestamp()
     user_id = message.author.id
     times = user_message_times.get(user_id, [])
@@ -433,6 +362,33 @@ async def on_message(message):
     global last_cache_write_time
 
     async with message.channel.typing():
+        if len(lines) > MAX_MESSAGES:
+            to_summarize = lines[:len(lines) - TRUNCATION]
+            lines = lines[len(lines) - TRUNCATION:]
+            print(f"\n\nContext limit hit. Summarizing and truncating...")
+            try:
+                summary_response = await anthropic_client.messages.create(
+                    model=SUMMARY_MODEL,
+                    max_tokens=MAX_TOKENS,
+                    messages=[{"role": "user", "content": "Summarize these chat messages briefly for yourself (Claude) without formatting, preserving key topics, names, and context:\n" + "\n".join(to_summarize)}]
+                )
+                summary = summary_response.content[0].text
+                summary_tokens_in = summary_response.usage.input_tokens
+                summary_tokens_out = summary_response.usage.output_tokens
+                summary_cache_read = get_cache_read_tokens(summary_response.usage)
+                summary_cache_write = get_cache_write_tokens(summary_response.usage)
+                summary_cost = (
+                    (summary_tokens_in / 1_000_000) * INPUT_TOKENS_COST +
+                    (summary_tokens_out / 1_000_000) * OUTPUT_TOKENS_COST +
+                    (summary_cache_write / 1_000_000) * (INPUT_TOKENS_COST * 1.25) +
+                    (summary_cache_read / 1_000_000) * (INPUT_TOKENS_COST * 0.1)
+                )
+                print(f"SUMMARY TOKENS IN: {summary_tokens_in} OUT: {summary_tokens_out} | CACHE WRITE: {summary_cache_write} READ: {summary_cache_read} | ESTIMATED COST: ${summary_cost:.6f}")
+            except Exception:
+                summary = "Earlier conversation context unavailable."
+            lines.insert(0, f"<summary>\nSummary of previous messages: {summary}\n</summary>")
+            save_messages(lines)
+
         tool_notes = []
 
         all_lines = lines[:-1]
@@ -440,6 +396,7 @@ async def on_message(message):
         cached_count = n - (n % CACHE_BLOCK_SIZE)
         cached_lines = all_lines[:cached_count]
         live_lines = all_lines[cached_count:]
+        print(f"CACHE BLOCK: cached={len(cached_lines)} lines, ~{len(chr(10).join(cached_lines))//4} est tokens")
 
         content = []
         if cached_lines:
@@ -451,14 +408,15 @@ async def on_message(message):
         respond_prefix = "CHIME IN AFTER: " if is_random else "RESPOND TO: "
         cache_ttl = 3600 if USE_LONG_CACHE else 300
         cache_is_warm = (time.time() - last_cache_write_time) < cache_ttl
-        cache_status = "WARM" if cache_is_warm else "COLD (avoid using tools, ask to chat more)"
+        cache_status = "Probably warm" if cache_is_warm else "Probably cold (avoid long tasks)"
         live_text = ("\n".join(live_lines) + "\n" if live_lines else "") + f"[Cache status: {cache_status}]\n" + respond_prefix + new_line
         content.append({"type": "text", "text": live_text})
         with open(LATEST_PROMPT_FILE, 'w', encoding='utf-8') as f:
-            f.write(system_prompt + "\n")
+            f.write(load_system_prompt() + "\n")
             for block in content:
                 f.write(block.get('text', '') + '\n')
 
+        current_system_prompt = load_system_prompt()
         messages = [{"role": "user", "content": content}]
         image_to_send = None
         has_replied = False
@@ -466,21 +424,22 @@ async def on_message(message):
         total_output_tokens = 0
         total_cache_read_tokens = 0
         total_cache_write_tokens = 0
-        response_text = "*no response*"
+        response_text = ""
+        any_tool_used = False
         try:
             while True:
                 try:
                     response = await anthropic_client.messages.create(
-                    model=MODEL,
-                    max_tokens=MAX_TOKENS,
-                    system=[{
-                        "type": "text",
-                        "text": system_prompt,
-                        "cache_control": CACHE_CONTROL
-                    }],
-                    tools=TOOLS,
-                    messages=messages
-                )
+                        model=MODEL,
+                        max_tokens=MAX_TOKENS,
+                        system=[{
+                            "type": "text",
+                            "text": current_system_prompt,
+                            "cache_control": CACHE_CONTROL
+                        }],
+                        tools=TOOLS,
+                        messages=messages
+                    )
                 except Exception as e:
                     response_text = f"*tool call failed: {e}*"
                     break
@@ -506,6 +465,7 @@ async def on_message(message):
                     tool_results = []
                     
                     for tool_use in tool_uses:
+                        any_tool_used = True
                         print(f"TOOL: {tool_use.name} | INPUT: {tool_use.input}")
                         if tool_use.name == "web_search":
                             query = tool_use.input["query"]
@@ -527,26 +487,16 @@ async def on_message(message):
                             query = tool_use.input["query"]
                             result = await wolfram_query(query)
                             tool_notes.append(f"-# Queried Wolfram Alpha: {query}")
-                        elif tool_use.name == "remember":
-                            memory = tool_use.input["memory"]
-                            memories = memory if isinstance(memory, list) else [memory]
-                            save_memory(memories)
-                            result = f"Remembered {len(memories)} item(s)"
-                            for m in memories:
-                                tool_notes.append(f"-# Remembered: {m}")
-                        elif tool_use.name == "recall_memory":
-                            query = tool_use.input["query"]
-                            results = recall_memories(query)
-                            result = "\n".join(results) if results else "Nothing found."
-                            tool_notes.append(f"-# Recalled memories: {query}")
-                        elif tool_use.name == "delete_memory":
-                            memory_id = tool_use.input["memory_id"]
-                            ids = memory_id if isinstance(memory_id, list) else [memory_id]
-                            delete_memory(ids)
-                            result = f"Deleted {len(ids)} memory entry(s)"
-                            for i in ids:
-                                tool_notes.append(f"-# Deleted memory entry: {i}")
-
+                        elif tool_use.name == "react":
+                            emoji = tool_use.input["emoji"]
+                            try:
+                                await message.add_reaction(emoji)
+                                result = f"Reacted with {emoji}"
+                                lines = load_messages()
+                                lines.append(f"[YOU REACTED WITH {emoji}]")
+                                save_messages(lines)
+                            except Exception as e:
+                                result = f"React failed: {e}"
                         elif tool_use.name == "image_search":
                             query = tool_use.input["query"]
                             img_url, error = await image_search(query)
@@ -612,6 +562,13 @@ async def on_message(message):
                                 except Exception as e:
                                     result = f"File fetch failed: {e}, have you tried web_fetch instead?"
                                     tool_notes.append(f"-# File fetch failed: {e}")
+
+                        elif tool_use.name == "write_memory":
+                            content = tool_use.input["content"]
+                            with open(MEMORY_FILE, 'w', encoding='utf-8') as f:
+                                f.write(content)
+                            result = "Memory saved."
+                            tool_notes.append(f"-# Memory updated")
                         else:
                             result = "Tool not recognized."
                         
@@ -636,11 +593,13 @@ async def on_message(message):
             return
 
         response_text = response_text.replace('\n\n', '\n').replace('@', '')
-        if not response_text.strip():
+        if not response_text.strip() and not any_tool_used and not image_to_send:
             response_text = "*no response*"
 
         if tool_notes:
             response_text = "\n".join(tool_notes) + "\n" + response_text
+        if not response_text.strip():
+            return
 
         if len(response_text) > 2000:
             chunks = [response_text[i:i+2000] for i in range(0, len(response_text), 2000)]
