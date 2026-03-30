@@ -17,7 +17,7 @@ Doesn't support DMs and technically doesn't support cross-server usage (input fo
 - Rolling message history with automatic summarization on truncation
 - Per-user rate limiting (very basic)
 - Web search via DuckDuckGo
-- Web fetch with HTML stripping (includes uploaded text files)
+- Web fetch with HTML stripping
 - Optional Wolfram Alpha integration for math, science, and unit conversions
 - Image search via DuckDuckGo (for some reason, ran into the most trouble with this, use at own discretion) (opted for this instead of image generation, I am against it)
 - Image analysis via vision
